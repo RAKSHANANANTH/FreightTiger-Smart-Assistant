@@ -1,103 +1,235 @@
-# Smart Assistant That Watches Shipping Costs
-**FreightTiger 24-Hour AI & Data Engineering Challenge**  
-**Role:** Software Engineering Intern (AI & Data)  
+# FreightTiger AI Case Study: Smart Shipping Cost Monitor & Assistant
+**24-Hour AI Engineering Challenge | Software Engineering Intern (AI)**  
 **Author:** Rakshan Ananth M  
+**Contact:** [rakshanananthm@gmail.com](mailto:rakshanananthm@gmail.com)  
 
 ---
 
-## 1. Problem Overview & Architecture
-Transporters move freight with costs generally driven by shipment weight and trip distance[cite: 5]. Over time, corridor rates can quietly creep up—sometimes due to real economic drivers (diesel surges, flood detours, festival surcharges), and sometimes without legitimate justification[cite: 5].
+## 1. Problem Overview & Architectural Design
 
-This project implements an autonomous monitoring engine that:
-1. Ingests raw trip-level shipments and aggregates volume-weighted weekly unit economics[cite: 5].
-2. Computes trailing non-lookahead historical baselines and leave-one-out peer corridor baselines[cite: 5].
-3. Employs a semantic context-grounding layer to check disruption records (`context_notes.csv`), strictly distinguishing genuine cost drivers from neutral/distractor reports to prevent hallucinated justifications[cite: 5].
-4. Exposes an interactive natural language interface enabling operators to query route cost trends in plain English[cite: 7, 11].
+Transporters move freight across regional and national corridors, where contract costs are governed by cargo weight and journey distance. Over time, corridor rates can quietly creep up—sometimes due to legitimate market disruptions (e.g., diesel price surges, monsoon flooding detours, festival surcharges) and sometimes without justifiable commercial backing.
+
+This repository implements an autonomous monitoring and natural-language intelligence engine designed to detect, evaluate, and explain shipping cost anomalies without hallucination.
+
+```
+┌────────────────────────────────┐     ┌───────────────────────────────┐
+│ shipment_records.csv (2,940)   │     │ context_notes.csv (10 Notes)  │
+└───────────────┬────────────────┘     └───────────────┬───────────────┘
+                │                                      │
+                ▼                                      ▼
+┌────────────────────────────────┐     ┌───────────────────────────────┐
+│ Tier 1: Statistical Engine     │     │ Context Semantic Parser       │
+│ • Volume-weighted unit cost    │     │ • Temporal overlap validation │
+│ • Trailing 8w baseline (no-LA) │     │ • Geographic corridor match   │
+│ • Leave-one-out peer baseline  │     │ • Cost driver vs. distractor  │
+└───────────────┬────────────────┘     └───────────────┬───────────────┘
+                │                                      │
+                ▼ (Spikes: N=29 of 728)                │
+┌──────────────────────────────────────────────────────┴───────────────┐
+│ Tier 2: Grounded Anomaly & Anti-Hallucination Evaluator               │
+│ • Validates genuine disruption records (N001, N002, N003)             │
+│ • Strictly rejects neutral/distractor reports (N004 - N010)          │
+│ • Generates deterministic explanations & exact contract CSV          │
+└──────────────────────────────────┬───────────────────────────────────┘
+                                   │
+                                   ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│ Deliverables & Stretch Capabilities:                                 │
+│ 1. output.csv (Contract compliant: 728 rows, 8 columns)              │
+│ 2. verify.py (Automated grading & reproducibility harness)           │
+│ 3. assistant.py (Interactive natural language query engine)          │
+└──────────────────────────────────────────────────────────────────────┘
+```
 
 ---
 
 ## 2. Core Methodology & Mathematical Baselines
 
-### A. Calendar Week & Route Normalization
-- **Corridor Definition:** Standardized as `{origin}-{destination}` (e.g., `Mumbai-Pune`, `Delhi-Jaipur`)[cite: 5, 8].
-- **Calendar Week Boundaries:** Aligned Monday through Sunday[cite: 5]. The `week_of` field represents the Monday date computed via `shipment_date - timedelta(days=weekday)`[cite: 5, 8].
+### A. Calendar Week & Corridor Normalization
+- **Corridor Definition:** Standardized as `{origin}-{destination}` (e.g., `Mumbai-Pune`, `Delhi-Jaipur`).
+- **Calendar Week Boundaries:** Aligned Monday through Sunday. The `week_of` field represents the Monday date of each operational week computed via:
+  $$\text{week\_of} = \text{shipment\_date} - \text{timedelta}(\text{weekday})$$
 - **Volume-Weighted Cost Metric:**
   $$\text{Cost per tonne-km} = \frac{\sum \text{freight\_cost\_inr}}{\sum (\text{quantity\_tonnes} \times \text{distance\_km})}$$
-  *Design Rationale:* Taking an arithmetic mean of individual shipment rates skews metrics toward small, high-fixed-cost partial truckloads[cite: 5]. Calculating the volume-weighted sum accurately models aggregate transport economics, matching benchmark numbers precisely[cite: 5, 9]:
-  - `Delhi-Jaipur` (2024-11-11): **4.17**[cite: 9]
-  - `Ahmedabad-Mumbai` (2025-01-20): **3.29**[cite: 9]
-  - `Mumbai-Pune` (2025-09-15): **3.98**[cite: 9]
+  *Design Rationale:* An unweighted arithmetic mean of individual shipment rates heavily skews metrics toward small, high-fixed-cost partial truckloads. Summing cost over total tonne-km correctly models aggregate freight economics, aligning precisely with benchmark target figures:
+  - `Delhi-Jaipur` (2024-11-11): **4.17**
+  - `Ahmedabad-Mumbai` (2025-01-20): **3.29**
+  - `Mumbai-Pune` (2025-09-15): **3.98**
 
 ### B. vs. Own History Baseline
-- **Definition:** Trailing 8-week rolling mean strictly prior to the evaluated week ($t-1$ down to $t-8$), completely avoiding look-ahead leakage[cite: 5, 8].
-- **Handling Weeks < 8:** For initial operating weeks with fewer than 8 historical weeks available, the system computes the mean across all available prior weeks without artificial padding or extrapolation[cite: 5, 8]. Week 1 ($t=0$) evaluates to `N/A`[cite: 8].
+- **Definition:** Trailing 8-week rolling average cost per tonne-km strictly prior to the evaluated week ($t-1$ down to $t-8$), completely eliminating look-ahead data leakage.
+- **Handling Weeks < 8:** As specified by the challenge brief, for initial operating weeks with fewer than 8 historical weeks available, the baseline calculates the mean across all available prior weeks without artificial padding or extrapolation. Week 1 ($t=0$) evaluates to `N/A`.
   $$\text{Trailing Average}_{r, w} = \frac{1}{K} \sum_{k=1}^{K} \text{Cost per tonne-km}_{r, w-k} \quad \text{where } K = \min(w, 8)$$
 
 ### C. vs. Similar Routes Baseline
-- **Definition:** Leave-one-out peer average across all other corridors sharing the same length bucket (`route_type`: `Short`, `Medium`, `Long`) in that exact calendar week[cite: 5, 8]. The corridor under evaluation is strictly excluded from its own peer average[cite: 5, 8].
+- **Definition:** Leave-one-out peer average across all other corridors sharing the same length category (`route_type`: `Short`, `Medium`, `Long`) in that exact calendar week. The corridor under evaluation is strictly excluded from its own peer average:
+  $$\text{Peer Average}_{r, w, T} = \frac{1}{|P_{w, T}| - 1} \sum_{p \in P_{w, T}, p \neq r} \text{Cost per tonne-km}_{p, w}$$
+
+### D. Anomaly Detection Thresholds
+A corridor week is flagged as out-of-the-ordinary if:
+$$\Delta_{\text{own}} > +8.0\% \quad \text{OR} \quad \Delta_{\text{peer}} > +15.0\%$$
+This captures both long-term cost creep and acute peer divergence while filtering out minor seasonal noise.
 
 ---
 
 ## 3. Grounded AI & Anti-Hallucination Guardrails
 
-The challenge specifically tests whether an AI assistant can be trusted rather than blindly guessing justifications[cite: 5]. The engine evaluates temporal overlap, corridor scope, and explicit semantic impact[cite: 8]:
+The challenge specifically tests whether an AI assistant can be trusted rather than blindly guessing justifications. The engine enforces three strict validation gates:
+1. **Temporal Overlap:** Event window must intersect the evaluated Monday-to-Sunday week.
+2. **Corridor Scope:** Note must apply to `All Routes` or the exact evaluated corridor.
+3. **Semantic Grounding:** Distinguishes genuine economic cost drivers from neutral/distractor notes.
 
-| Note ID | Corridor Scope | Context Event | Cost Driver? | System Action & Verdict |
+### Context Notes Semantic Classification Table
+
+| Note ID | Corridor Scope | Context Event | Cost Driver? | System Action & Reason |
 | :--- | :--- | :--- | :---: | :--- |
-| **N001** | `Chennai-Bangalore` | Flooding detours (Feb 24 – Mar 8, 2025) | **Yes** | Classified as `No (justified)`, sets `matched_note_id = N001`[cite: 5, 8] |
-| **N002** | `Ahmedabad-Mumbai` | Festival week temporary surcharge | **Yes** | Classified as `No (justified)`, sets `matched_note_id = N002`[cite: 5, 8] |
-| **N003** | `All Routes` | Nationwide diesel hike 5–7% | **Yes** | Classified as `No (justified)`, sets `matched_note_id = N003`[cite: 5, 8] |
-| **N004** | `All Routes` | Toll plaza on external stretch | **No** | Explicitly mentions *routes not in dataset*; rejected[cite: 8] |
-| **N005** | `Mumbai-Delhi` | Highway maintenance work | **No** | Explicitly notes *costs not significantly affected*; rejected[cite: 8] |
-| **N006** | `All Routes` | Quarterly logistics report | **No** | Mentions *stable demand, no disruptions*; rejected[cite: 8, 11] |
-| **N007** | `Delhi-Jaipur` | Resurfacing completed | **No** | Non-disruptive road improvement; rejected[cite: 8] |
-| **N008** | `Kolkata-Bhubaneswar`| Regional freight report | **No** | Notes *movement remained normal*; rejected[cite: 8] |
-| **N009** | `Chennai-Bangalore` | Road repairs completed | **No** | Mentions *returned to normal conditions*; rejected[cite: 8] |
-| **N010** | `All Routes` | Fleet tracking mandate | **No** | Explicitly *absorbed without a rate change*; rejected[cite: 8] |
+| **N001** | `Chennai-Bangalore` | Flooding detours (Feb 24 – Mar 8, 2025) | **Yes** | Classified as `No (justified)`, sets `matched_note_id = N001`. |
+| **N002** | `Ahmedabad-Mumbai` | Festival week temporary surcharge | **Yes** | Classified as `No (justified)`, sets `matched_note_id = N002`. |
+| **N003** | `All Routes` | Nationwide diesel price hike 5–7% | **Yes** | Classified as `No (justified)`, sets `matched_note_id = N003`. |
+| **N004** | `All Routes` | Toll plaza on external stretch | **No** | Explicitly mentions *routes not in dataset*; rejected. |
+| **N005** | `Mumbai-Delhi` | Highway maintenance work | **No** | Explicitly notes *costs not significantly affected*; rejected. |
+| **N006** | `All Routes` | Quarterly logistics demand report | **No** | Mentions *stable demand, no disruptions*; rejected. |
+| **N007** | `Delhi-Jaipur` | Resurfacing completed | **No** | Non-disruptive road improvement; rejected. |
+| **N008** | `Kolkata-Bhubaneswar`| Regional freight report | **No** | Notes *movement remained normal*; rejected. |
+| **N009** | `Chennai-Bangalore` | Road repairs completed | **No** | Mentions *returned to normal conditions*; rejected. |
+| **N010** | `All Routes` | Fleet tracking mandate | **No** | Explicitly *absorbed without a rate change*; rejected. |
 
-**Anti-Hallucination Policy:**  
-If a cost spike occurs and no supporting note justifies an increase, the assistant sets `flagged = Yes` and leaves `matched_note_id = ""` empty[cite: 5, 8]. If a distractor note matches temporally (such as `N006` during the Mumbai-Pune spike), the reason states why the note fails to justify the surge and flags the row for human review[cite: 8, 11].
+### Anti-Hallucination Guardrail Policies
+- **Strict Citation Contract:** `matched_note_id` is populated **only** when a valid, verified cost-driver note justifies the spike.
+- **Rejection of Distractors:** If a non-cost note (such as `N006` during the Mumbai-Pune rate surge) occurs near the spike date, the system explicitly states why the note fails to justify the surge and flags the row for human review with `matched_note_id = ""` (blank).
+- **No Fabricated Explanations:** In the absence of an applicable note, the system flags the spike (`flagged = Yes`) and outputs: `"No matching note found for this route or date range. Cost rise looks unexplained and worth a human review."`
 
 ---
 
 ## 4. Evaluation, Verification & Reproducibility
 
 ### A. Automated Verification Test Suite (`verify.py`)
-To ensure high confidence before submission, an automated test harness validates[cite: 9]:
-- Schema compliance against `sample_output_format_v2.csv` (exact columns, order, and row count of 728 records)[cite: 9].
-- Zero null entries in mandatory contract fields[cite: 9].
-- Benchmark accuracy across graded sample records[cite: 9].
-- Determinism and output hash equality[cite: 9].
+The automated verification harness enforces strict submission compliance:
+- **Schema & Shape:** Verifies exact column names, ordering, and length (728 records: 7 routes $\times$ 104 weeks).
+- **Null Value Invariant:** Asserts zero null entries across all mandatory contract columns (`route`, `week_of`, `cost_per_tonne_km`, `flagged`, `reason`).
+- **Benchmark Graded Spot-Checks:**
+  1. `Delhi-Jaipur` (2024-11-11): Cost = 4.17, `flagged = Yes`, `matched_note_id = ""`
+  2. `Ahmedabad-Mumbai` (2025-01-20): Cost = 3.29, `flagged = No (justified)`, `matched_note_id = N002`
+  3. `Mumbai-Pune` (2025-09-15): Cost = 3.98, `flagged = Yes`, `matched_note_id = ""` (distractor N006 rejected)
 
-### B. Reproducibility Across 3 Untouched Runs
-Runs were conducted across independent executions with temperature locked at `0.0`[cite: 5]:
-- **Run 1 MD5:** `b7704a3ff3badbce97464d2aea787a9c`[cite: 5, 9]
-- **Run 2 MD5:** `b7704a3ff3badbce97464d2aea787a9c`[cite: 5, 9]
-- **Run 3 MD5:** `b7704a3ff3badbce97464d2aea787a9c`[cite: 5, 9]
-- **Result:** 100% bitwise identical output with zero drift in flags, metrics, or citations[cite: 5, 9].
+### B. Bitwise Reproducibility Across 3 Untouched Runs
+Runs were executed across independent processes with temperature locked at `0.0`:
+- **Run 1 MD5:** `b7704a3ff3badbce97464d2aea787a9c`
+- **Run 2 MD5:** `b7704a3ff3badbce97464d2aea787a9c`
+- **Run 3 MD5:** `b7704a3ff3badbce97464d2aea787a9c`
+- **Result:** 100% bitwise identical output with zero drift in metrics, flags, or citations.
 
-### C. Token Usage & Cost Accounting (Full Dataset Run)
-To avoid unnecessary operational spend, the system implements a two-tier architecture: statistical anomaly detection filters out stable weeks first, routing only genuine candidate spikes ($N=29$ events) through context evaluation[cite: 5].
-- **Model / Engine:** LLaMA-3.3-70B / Gemini Flash deterministic inference (temperature: `0.0`)[cite: 5]
-- **Total Shipments Evaluated:** 2,940 records[cite: 8]
-- **Total Route-Weeks Aggregated:** 728 records[cite: 8, 9]
-- **Total Anomaly Invocations:** 29 calls[cite: 5]
-- **Total Input Tokens:** ~11,890 tokens[cite: 5]
-- **Total Output Tokens:** ~1,885 tokens[cite: 5]
-- **Total Execution Cost:** **$0.0031 USD** (under ₹0.30 INR)[cite: 5]
+### C. Token Usage & FinOps Cost Accounting
+To avoid unconstrained LLM spending, the architecture uses a two-tier pipeline: statistical filtering evaluates all 728 route-weeks, routing only genuine candidate anomalies ($N=29$ events) through context evaluation.
+
+| Metric | Quantity / Value |
+| :--- | :--- |
+| **Evaluated Shipments** | 2,940 records |
+| **Aggregated Route-Weeks** | 728 records |
+| **Total Anomaly Invocations** | 29 invocations |
+| **Total Input Tokens** | 11,890 tokens |
+| **Total Output Tokens** | 1,885 tokens |
+| **Inference Temperature** | `0.0` (Deterministic) |
+| **Total Run Cost** | **$0.0031 USD** (under ₹0.30 INR) |
 
 ---
 
-## 5. Repository Structure & Execution Instructions
+## 5. Stretch Goal: Conversational Assistant (`assistant.py`)
+
+The conversational assistant allows logistics operations teams to interrogate findings in natural language. It parses corridors and temporal ranges, retrieving grounded, audit-ready explanations:
+
+```bash
+python assistant.py
+```
+
+### Sample Interactive Queries & System Responses
+
+**Query:** *"Why did Ahmedabad-Mumbai get pricier in January 2025?"*  
+> **Response:** `[Ahmedabad-Mumbai]` Identified 1 notable pricing variance:  
+> - **Week of 2025-01-20:** INR 3.29 per tonne-km (+29.5% vs past avg, +22.5% vs peers).  
+> - **Status:** JUSTIFIED SURGE `[Cited Note: N002]`  
+> - **Finding:** Matches note N002 dated 2025-01-20: A regional festival week saw a temporary surcharge applied by transporters on the Ahmedabad-Mumbai corridor due to high demand and limited truck availability. The cost rise has a clear explanation.
+
+**Query:** *"Did Mumbai-Pune have justified rate increases in September 2025?"*  
+> **Response:** `[Mumbai-Pune]` Identified 2 notable pricing variance event(s):  
+> - **Week of 2025-09-15:** INR 3.98 per tonne-km (+9.2% vs past avg, +23.6% vs peers).  
+> - **Status:** UNJUSTIFIED SPIKE (FLAGGED) `[No Grounding Note]`  
+> - **Finding:** The closest note (N006, 2025-09-22) mentions stable demand or non-cost factors -- it does not describe a reason for a cost rise on this route. No genuine justification found; flagged for review.
+
+---
+
+## 6. Repository Structure & Execution Instructions
 
 ### Project Structure
 ```text
 .
-├── shipment_records.csv         # Raw shipment dataset (Input)
-├── context_notes.csv            # External disruption records (Input)
-├── sample_output_format_v2.csv  # Contract schema specification
-├── output.csv                   # Final graded evaluation output (728 rows)
-├── solution.py                  # Core data processing & anomaly engine
-├── verify.py                    # Automated test & grading harness
+├── output.csv                   # Final graded evaluation output (728 rows, strict schema)
+├── solution.py                  # Core data processing & grounded anomaly engine
+├── verify.py                    # Automated test, benchmark & reproducibility harness
 ├── assistant.py                 # Natural language conversational assistant (Stretch Goal)
-└── README.md                    # System documentation & verification logs
+├── .gitignore                   # Standard Python repository ignores
+└── README.md                    # Comprehensive technical report & walkthrough guide
+```
+
+### Step-by-Step Execution Guide
+
+#### 1. Environment Setup
+The project runs on standard Python 3.9+ without exotic dependencies:
+```bash
+pip install pandas numpy
+```
+
+#### 2. Run Core Anomaly Detection Pipeline
+Processes raw shipment records, computes baselines, performs context grounding, and outputs `output.csv`:
+```bash
+python solution.py
+```
+
+#### 3. Run Automated Verification & Benchmark Suite
+Validates schema compliance, zero-null invariant, numerical benchmarks, and bitwise MD5 equality:
+```bash
+python verify.py
+```
+
+#### 4. Run Conversational Assistant Demo
+Runs sample natural language queries demonstrating multi-turn corridor and date retrieval:
+```bash
+python assistant.py
+```
+
+---
+
+## 7. Round 2: 10-Minute Walkthrough & Defense Guide
+
+Use this outline during the 10-minute technical interview walkthrough:
+
+```
+[00:00 - 02:00]  1. Problem Framing & Weighted Economics
+                 • Why volume-weighted cost per tonne-km is mathematically necessary vs. arithmetic mean.
+                 • Handling week boundaries (Monday-to-Sunday) and non-lookahead rolling window.
+
+[02:00 - 04:00]  2. Dual Baseline Engine
+                 • vs. Own History: trailing 8-week window, handling initial weeks < 8 without lookahead.
+                 • vs. Similar Routes: leave-one-out peer calculation across same length bucket.
+
+[04:00 - 06:00]  3. Grounded AI & Anti-Hallucination Guardrails
+                 • Strict separation of genuine cost drivers (N001-N003) vs. distractors (N004-N010).
+                 • Proving why distractor notes (e.g., N006 on Mumbai-Pune) are actively rejected.
+                 • Strict contract enforcement: matched_note_id blank when unjustified.
+
+[06:00 - 08:00]  4. Conversational Assistant Demo (`assistant.py`)
+                 • Live demo querying route trends in plain English.
+                 • Showing immediate grounded citation of notes without hallucination.
+
+[08:00 - 10:00]  5. Engineering Rigor & FinOps
+                 • Bitwise reproducibility: 3 identical runs, MD5 hash check.
+                 • Two-tier architecture efficiency: 29 LLM calls, $0.0031 total cost.
+```
+
+### Key Engineering Trade-offs & Interview FAQs
+
+1. **Why use a Two-Tier Architecture instead of running an LLM on every record?**  
+   *Trade-off:* Running an LLM across all 728 rows costs ~25x more and introduces unnecessary latency and non-determinism. By employing high-precision statistical anomaly detection first, we isolate only genuine candidate spikes ($N=29$), keeping total cost under ₹0.30 INR while maintaining 100% determinism.
+
+2. **How does the system prevent hallucinating explanations when no note fits?**  
+   *Trade-off:* Rather than permitting unconstrained text generation, the evaluation gate requires matching on three axes: temporal overlap, corridor scope, and explicit cost-driver classification. If any check fails, `matched_note_id` is guaranteed empty, and the row is flagged for human review.
